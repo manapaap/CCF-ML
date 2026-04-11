@@ -113,7 +113,7 @@ def plot_field_patches(data, title='', cbar_lab='',
                              transform=ccrs.PlateCarree(), zorder=10)
     ax.add_patch(rect4)
     
-    rect5 = patches.Rectangle((80, -45), 30, 25, linewidth=2,
+    rect5 = patches.Rectangle((75, -45), 35, 25, linewidth=2,
                              edgecolor='darkgrey', facecolor='lightcoral',
                              label='SEI', alpha=0.9, fill=False,
                              linestyle='dashed', 

@@ -163,7 +163,7 @@ def get_stratocumulus_regions():
             'min_lat': -30, 'max_lat': -5
         },
         'SEI': {  # Southeast Indian
-            'min_lon': 80,  'max_lon': 110,
+            'min_lon': 75,  'max_lon': 110,
             'min_lat': -45, 'max_lat': -20
         },
     }

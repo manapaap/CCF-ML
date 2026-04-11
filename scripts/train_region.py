@@ -20,6 +20,8 @@ from sklearn.base import clone
 from sklearn.model_selection import RandomizedSearchCV
 from scipy.stats import randint, uniform
 from sklearn.inspection import PartialDependenceDisplay, permutation_importance
+import pickle
+from sklearn.inspection import partial_dependence
 
 
 os.chdir('C:/Users/aakas/Documents/CCF-ML/')
@@ -305,8 +307,139 @@ def fit_final_model(xr_ds, feature_cols, target_col, best_params,
     return X_test, y_test, final_model
 
 
+def plot_pdp(model, X_test, feature_cols, ccf_means, ccf_std,
+             units=None, title=None, n_cols=2, figsize=(12, 16)):
+    """
+    Plots partial dependence plots in a clean two-column layout,
+    rescaling axes from normalized anomalies back to physical units.
+
+    Parameters
+    ----------
+    model        : fitted sklearn estimator
+    X_test       : np.ndarray, test features in normalized units
+    feature_cols : list of str, feature names matching columns of X_test
+    ccf_means    : xarray.Dataset, per-variable means from normalization
+    ccf_std      : xarray.Dataset, per-variable stds from normalization
+    units        : dict mapping feature/target names to unit strings, e.g.
+                   {'sst': '°C', 'eis': 'K', ...}
+                   If None, no units shown.
+    title        : str, overall figure title. If None, no title.
+    n_cols       : int, number of columns in subplot grid
+    figsize      : tuple, figure size
+    """
+    n_features = len(feature_cols)
+    n_rows = int(np.ceil(n_features / n_cols))
+    units = units or {}
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+    axes_flat = axes.flatten()
+
+    # Compute PDPs manually so we can rescale both axes
+    target_std  = float(ccf_std['cldarea_low_adj'].values)
+    target_mean = float(ccf_means['cldarea_low_adj'].values)
+
+    for i, (feat, ax) in enumerate(zip(feature_cols, axes_flat)):
+        pd_results = partial_dependence(
+            model, X_test, features=[i],
+            kind='average', grid_resolution=50
+        )
+
+        # Rescale x axis: x_physical = x_norm * std + mean
+        feat_std  = float(ccf_std[feat].values)
+        feat_mean = float(ccf_means[feat].values)
+        x_vals = pd_results['grid_values'][0] * feat_std + feat_mean
+
+        # Rescale y axis: y_physical = y_norm * std + mean
+        # PDP is centered (anomaly), so only multiply by std
+        y_vals = pd_results['average'][0] * target_std
+
+        ax.plot(x_vals, y_vals, color='steelblue', linewidth=2)
+        ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.5)
+        ax.axvline(feat_mean, color='grey', linewidth=0.8,
+                   linestyle=':', alpha=0.5, label='mean')
+
+        unit_str = f" ({units[feat]})" if feat in units else ""
+        ax.set_xlabel(f"{feat}{unit_str}", fontsize=11)
+
+        target_unit = f" ({units.get('cldarea_low_adj', '%')})"
+        ax.set_ylabel(f"Δ low cloud{target_unit}", fontsize=10)
+        ax.tick_params(labelsize=9)
+        ax.grid(True, alpha=0.3)
+
+    # Hide any unused axes
+    for ax in axes_flat[n_features:]:
+        ax.set_visible(False)
+
+    if title:
+        fig.suptitle(title, fontsize=14, fontweight='bold', y=1.01)
+
+    plt.tight_layout()
+    return fig, axes
+
+
+def plot_varimp(model, X_test, y_test, feature_cols,
+                title=None, n_repeats=10, figsize=(8, 5),
+                random_state=42):
+    """
+    Plots permutation feature importance as a horizontal bar chart
+    with 1-sigma error bars.
+
+    Parameters
+    ----------
+    model        : fitted sklearn estimator
+    X_test       : np.ndarray
+    y_test       : np.ndarray
+    feature_cols : list of str
+    title        : str or None
+    n_repeats    : int, number of permutation repeats
+    figsize      : tuple
+    random_state : int
+
+    Returns
+    -------
+    fig, ax, importances_df : figure, axis, and DataFrame of results
+    """
+    perm = permutation_importance(
+        model, X_test, y_test,
+        n_repeats=n_repeats,
+        n_jobs=-1,
+        random_state=random_state
+    )
+
+    importances_df = pd.DataFrame({
+        'feature':   feature_cols,
+        'importance': perm.importances_mean,
+        'std':        perm.importances_std
+    }).sort_values('importance', ascending=True)
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    ax.barh(
+        importances_df['feature'],
+        importances_df['importance'],
+        xerr=importances_df['std'],
+        color='steelblue',
+        ecolor='black',
+        capsize=4,
+        edgecolor='white',
+        linewidth=0.5
+    )
+
+    ax.axvline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.5)
+    ax.set_xlabel('Mean decrease in R²', fontsize=11)
+    ax.set_ylabel('Feature', fontsize=11)
+    ax.tick_params(labelsize=10)
+    ax.grid(True, axis='x', alpha=0.3)
+
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold')
+
+    plt.tight_layout()
+    return fig, ax, importances_df
+
+
 def main():
-    global X_test, y_test, final_model, ccf_sep
+    global X_test, y_test, final_model, ccf_sep, best_params
     np.random.seed(6767)
     # load anomaly data
     ccf_data = xr.open_dataset('clean_data/ccf_clouds_clean.nc')
@@ -352,9 +485,10 @@ def main():
     # Random forest has an R2 of 0.26, while linear regression has R2 of 0.31
     # Hyperparameter search!
     
-    is_tuned = os.path.isfile('misc/hyperparams/sep_rf_params.csv')
+    is_tuned = os.path.isfile('misc/hyperparams/sep_rf_params.pkl')
     
     if not is_tuned:
+        print('Tuned hyperparameters not found. Optimizing...')
         param_distributions = {
         'n_estimators':     randint(100, 500),
         'max_depth':        [5, 10, 20, None],
@@ -377,10 +511,14 @@ def main():
         )
         # fit model based on best hyperparameters
         best_params = select_best_params(results)
-        best_params.to_csv('misc/hyperparams/sep_rf_params.csv')
+        with open('misc/hyperparams/sep_rf_params.pkl', 'wb') as f:
+            pickle.dump(best_params, f)
+        
     else:
-        best_params = pd.read_csv('misc/hyperparams/sep_rf_params.csv')
-    
+        print('Using optimal hyperparameters')
+        with open('misc/hyperparams/sep_rf_params.pkl', 'rb') as f:
+            best_params = pickle.load(f)
+            
     X_test, y_test, final_model = fit_final_model(
         xr_ds        = ccf_sep,
         feature_cols = ['sst', 'eis', 'speed',
