@@ -307,66 +307,69 @@ def fit_final_model(xr_ds, feature_cols, target_col, best_params,
     return X_test, y_test, final_model
 
 
-def plot_pdp(model, X_test, feature_cols, ccf_means, ccf_std,
-             units=None, title=None, n_cols=2, figsize=(12, 16)):
+def plot_pdp(models, feature_cols, units=None,
+             title=None, n_cols=4, figsize=(16, 6)):
     """
-    Plots partial dependence plots in a clean two-column layout,
+    Plots partial dependence plots with support for multiple models,
     rescaling axes from normalized anomalies back to physical units.
 
     Parameters
     ----------
-    model        : fitted sklearn estimator
-    X_test       : np.ndarray, test features in normalized units
-    feature_cols : list of str, feature names matching columns of X_test
-    ccf_means    : xarray.Dataset, per-variable means from normalization
-    ccf_std      : xarray.Dataset, per-variable stds from normalization
-    units        : dict mapping feature/target names to unit strings, e.g.
-                   {'sst': '°C', 'eis': 'K', ...}
-                   If None, no units shown.
-    title        : str, overall figure title. If None, no title.
-    n_cols       : int, number of columns in subplot grid
-    figsize      : tuple, figure size
+    models       : dict of {label: (fitted_estimator, X_test, ccf_std)}
+                   e.g. {'SEP': (sep_model, X_test_sep, std_sep),
+                         'NEP': (nep_model, X_test_nep, std_nep)}
+                   or   {'Linear': (lin_model, X_test, std),
+                         'RF':     (rf_model,  X_test, std)}
+    feature_cols : list of str, feature names
+    ccf_means    : xarray.Dataset, per-variable means (for x rescaling)
+                   Can be shared since deseasonalized means are ~0
+    units        : dict mapping variable names to unit strings
+    title        : str or None
+    n_cols       : int
+    figsize      : tuple
     """
     n_features = len(feature_cols)
     n_rows = int(np.ceil(n_features / n_cols))
     units = units or {}
 
+    # Cycle through colors for each model
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+
     fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
     axes_flat = axes.flatten()
 
-    # Compute PDPs manually so we can rescale both axes
-    target_std  = float(ccf_std['cldarea_low_adj'].values)
-    target_mean = float(ccf_means['cldarea_low_adj'].values)
-
     for i, (feat, ax) in enumerate(zip(feature_cols, axes_flat)):
-        pd_results = partial_dependence(
-            model, X_test, features=[i],
-            kind='average', grid_resolution=50
-        )
+        for color, (label, (model, X_test, ccf_std, ccf_means)) in zip(colors, models.items()):
 
-        # Rescale x axis: x_physical = x_norm * std + mean
-        feat_std  = float(ccf_std[feat].values)
-        feat_mean = float(ccf_means[feat].values)
-        x_vals = pd_results['grid_values'][0] * feat_std + feat_mean
+            feat_std   = float(ccf_std[feat].values)
+            feat_mean = float(ccf_means[feat].values)
+            target_std = float(ccf_std['cldarea_low_adj'].values)
 
-        # Rescale y axis: y_physical = y_norm * std + mean
-        # PDP is centered (anomaly), so only multiply by std
-        y_vals = pd_results['average'][0] * target_std
+            pd_results = partial_dependence(
+                model, X_test, features=[i],
+                kind='average', grid_resolution=50
+            )
 
-        ax.plot(x_vals, y_vals, color='steelblue', linewidth=2)
+            # Rescale: multiply by std (means are ~0 for deseasonalized data)
+            x_vals = pd_results['grid_values'][0] * feat_std + feat_mean
+            y_vals = pd_results['average'][0] * target_std
+
+            ax.plot(x_vals, y_vals, color=color, linewidth=2, label=label)
+
         ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.5)
-        ax.axvline(feat_mean, color='grey', linewidth=0.8,
-                   linestyle=':', alpha=0.5, label='mean')
 
-        unit_str = f" ({units[feat]})" if feat in units else ""
-        ax.set_xlabel(f"{feat}{unit_str}", fontsize=11)
+        unit_str = f" {units[feat]}" if feat in units else feat
+        ax.set_xlabel(unit_str, fontsize=11)
 
-        target_unit = f" ({units.get('cldarea_low_adj', '%')})"
-        ax.set_ylabel(f"Δ low cloud{target_unit}", fontsize=10)
+        target_unit = units.get('cldarea_low_adj', '%')
+        ax.set_ylabel(f"Δ {target_unit}", fontsize=10)
         ax.tick_params(labelsize=9)
         ax.grid(True, alpha=0.3)
 
-    # Hide any unused axes
+    # Single shared legend in first axis
+    axes_flat[0].legend(fontsize=9, framealpha=0.7)
+
+    # Hide unused axes
     for ax in axes_flat[n_features:]:
         ax.set_visible(False)
 
@@ -455,33 +458,28 @@ def main():
     ccf_std = ccf_sep.std()
     ccf_sep -= ccf_means
     ccf_sep /= ccf_std
+    # rescale cold advection from K/s to K/day
+    ccf_std['cold_adv'] *= 24 * 60 * 60
+    ccf_means['cold_adv'] *= 24 * 60 * 60
     # drop useless vars
     ccf_sep = ccf_sep.drop_vars(['u10', 'v10', 'msl'])
+    # formatting
+    feature_cols = ['sst', 'eis', 'speed', 'cold_adv',
+                'w_700', 'ln_AOD', 'rh_700', 'cldarea_high']
+
+    units = {
+        'sst':          'SST (°C)',
+        'eis':          'EIS (K)',
+        'speed':        '10m Windspeed (m/s)',
+        'cold_adv':     'Cold Advection (K/day)',
+        'w_700':        'Subsidence (Pa/s)',
+        'ln_AOD':       'ln(AOD) (N/A)',
+        'rh_700':       '700 hPa RH (%)',
+        'cldarea_high': 'Cirrus Cloud Cover (%)',
+        'cldarea_low_adj': 'Low Cloud Cover (%)'
+    }
     # generate rf models and summary results
-    print('Default Random Forest')
-    _, _ = run_spatial_temporal_cv(
-                        xr_ds        = ccf_sep,
-                        feature_cols = ['sst', 'eis', 'speed',
-                                        'cold_adv', 'w_700', 'ln_AOD',
-                                        'rh_700', 'cldarea_high'],
-                        target_col   = 'cldarea_low_adj',
-                        n_folds=5, block_size=5,
-                        model=RandomForestRegressor(n_estimators=100,
-                                                    max_depth=None,
-                                                    min_samples_leaf=1,
-                                                    n_jobs=-1)
-        )
-    # linear regression?
-    print('Linear Regression')
-    _, _ = run_spatial_temporal_cv(
-                        xr_ds        = ccf_sep,
-                        feature_cols = ['sst', 'eis', 'speed',
-                                        'cold_adv', 'w_700', 'ln_AOD',
-                                        'rh_700', 'cldarea_high'],
-                        target_col   = 'cldarea_low_adj',
-                        n_folds=5, block_size=5,
-                        model=LinearRegression(),
-        )
+
     # Random forest has an R2 of 0.26, while linear regression has R2 of 0.31
     # Hyperparameter search!
     
@@ -498,9 +496,7 @@ def main():
     
         results, models = run_spatial_temporal_cv_tuned(
             xr_ds               = ccf_sep,
-            feature_cols        = ['sst', 'eis', 'speed',
-                                    'cold_adv', 'w_700', 'ln_AOD',
-                                    'rh_700', 'cldarea_high'],
+            feature_cols        = feature_cols,
             target_col          = 'cldarea_low_adj',
             model               = RandomForestRegressor(n_jobs=-1),
             param_distributions = param_distributions,
@@ -521,47 +517,46 @@ def main():
             
     X_test, y_test, final_model = fit_final_model(
         xr_ds        = ccf_sep,
-        feature_cols = ['sst', 'eis', 'speed',
-                                'cold_adv', 'w_700', 'ln_AOD',
-                                'rh_700', 'cldarea_high'],
+        feature_cols = feature_cols,
         target_col   = 'cldarea_low_adj',
         best_params  = best_params,
         base_model   = RandomForestRegressor(n_jobs=-1)
     )
     
+    X_test, y_test, lin_model = fit_final_model(
+        xr_ds        = ccf_sep,
+        feature_cols = feature_cols,
+        target_col   = 'cldarea_low_adj',
+        best_params  = dict(),
+        base_model   = LinearRegression()
+    )
+    
     # variable importance and partial dependence
     # PDP
-    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    models = {
+        # 'Linear':      (final_model, X_test, ccf_std, ccf_means),
+        'RF Regressor': (final_model, X_test, ccf_std, ccf_means),
+    }
+    
+    fig, axes = plot_pdp(
+                models       = models,
+                feature_cols = feature_cols,
+                units        = units,
+                title        = 'PDP Comparison — SEP'
+            )
+    # fig_pdp.savefig('figures/sep_pdp.png', dpi=150, bbox_inches='tight')
+    
+    fig_vi, _, imp_df = plot_varimp(
+                model        = final_model,
+                X_test       = X_test,
+                y_test       = y_test,
+                feature_cols = feature_cols,
+                title        = 'Permutation Importance — SEP'
+            )
+    
+    # fig_vi.savefig('figures/sep_varimp.png', dpi=150, bbox_inches='tight')
 
-    PartialDependenceDisplay.from_estimator(
-        final_model,
-        X_test,
-        features=list(range(8)),
-        feature_names=['sst', 'eis', 'speed',
-                                'cold_adv', 'w_700', 'ln_AOD',
-                                'rh_700', 'cldarea_high'],
-        n_jobs=-1,
-        ax=ax
-    )
-    plt.tight_layout()
-    
-    # VarImp
-    perm = permutation_importance(
-        final_model, X_test, y_test,
-        n_repeats=10,
-        n_jobs=-1,
-        random_state=42)
-    
-    perm_importances = pd.Series(
-        perm.importances_mean,
-        index=['sst', 'eis', 'speed',
-                                'cold_adv', 'w_700', 'ln_AOD',
-                                'rh_700', 'cldarea_high']
-    ).sort_values(ascending=False)
-
-    print(perm_importances)
-    
-    
 if __name__ == '__main__':
     main()
     

@@ -15,6 +15,8 @@ import cartopy.crs as ccrs
 import numpy as np
 from matplotlib.colors import TwoSlopeNorm
 import matplotlib.patches as patches
+import matplotlib.lines as mlines
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 chdir('C:/Users/aakas/Documents/CCF-ML/')
@@ -123,17 +125,128 @@ def plot_field_patches(data, title='', cbar_lab='',
     plt.legend(loc='lower right', ncols=5)
 
     if to:
-        fig.savefig(f'figures\saves\{to}.png', dpi=600,
+        fig.savefig(f'figures/saves/{to}.png', dpi=600,
                     bbox_inches='tight', pad_inches=0)      
     plt.show()
 
 
+def plot_field_patches_4panel(data, eis, w_700, fig_label='',
+                               levels=8, to='', cent_lon=180):
+    proj = ccrs.PlateCarree(central_longitude=cent_lon)
+
+    datasets = [data, eis, w_700]
+    panel_labels = ['(a)', '(b)', '(c)']
+    cbar_labels = ['Low Cloud Cover', 'EIS', 'ω₇₀₀ ']
+    units = ['%', 'K', 'Pa s⁻¹']
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 4), dpi=300,
+                             subplot_kw={'projection': proj},
+                             gridspec_kw={'hspace': 0.15, 'wspace': 0.15})
+    axes = axes.flatten()
+
+    regions = [
+        (210, 15,  35, 25, 'cyan',       'NEP'),
+        (250, -30, 40, 25, 'lime',       'SEP'),
+        (305, 10,  35, 25, 'indigo',     'NEA'),
+        (340, -30, 35, 25, 'dodgerblue', 'SEA'),
+        (75,  -45, 35, 25, 'darkgrey',   'SEI'),
+    ]
+
+    for i, (ax, ds, plabel, clab, unit) in enumerate(
+            zip(axes, datasets, panel_labels, cbar_labels, units)):
+
+        era5 = ds.fillna(0).copy()
+        lon = era5.lon.values
+        lat = era5.lat.values
+        lon2d, lat2d = np.meshgrid(lon, lat)
+
+        vmin, vmax = np.nanpercentile(era5.values, [0.5, 99.5])
+        if vmin >= 0:
+            norm = TwoSlopeNorm(vmin=vmin, vcenter=(vmin + vmax) / 2, vmax=vmax)
+            cmap = 'Reds'
+        elif vmax <= 0:
+            norm = TwoSlopeNorm(vmin=vmin, vcenter=(vmin + vmax) / 2, vmax=vmax)
+            cmap = 'Blues_r'
+        else:
+            norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+            cmap = 'RdBu_r'
+
+        ax.set_global()
+        ax.set_ylim((-60, 60))
+        pcm = ax.pcolormesh(lon2d, lat2d, era5,
+                            transform=ccrs.PlateCarree(),
+                            shading='nearest', cmap=cmap, norm=norm)
+
+        lon1d = lon2d.reshape(-1)
+        lat1d = lat2d.reshape(-1)
+        era1d = np.asarray(era5).reshape(-1)
+        contour_levels = np.linspace(vmin, vmax, levels)
+        contour = ax.tricontour(lon1d, lat1d, era1d,
+                                levels=contour_levels,
+                                colors='black', linewidths=0.6,
+                                transform=ccrs.PlateCarree())
+        ax.clabel(contour, inline=True, fontsize=7)
+
+        ax.coastlines(linewidth=0.5)
+        gl = ax.gridlines(draw_labels=True, zorder=5, alpha=0.6,
+                          linewidth=0.4)
+        gl.right_labels = False
+        gl.top_labels = False
+        gl.left_labels = (i % 2 == 0)
+        gl.bottom_labels = (i >= 2)
+
+        # Colorbar matched to axes height
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='3%', pad=0.05,
+                                  axes_class=plt.Axes)
+        cbar = fig.colorbar(pcm, cax=cax, format='%.2g')
+        cbar.set_label(unit, fontsize=9)
+        cbar.ax.tick_params(labelsize=8)
+
+        ax.set_title(f'{plabel} {clab}')
+
+        legend_handles = []
+        for (lon0, lat0, dlon, dlat, color, label) in regions:
+            rect = patches.Rectangle(
+                (lon0, lat0), dlon, dlat,
+                linewidth=1.8, edgecolor=color, facecolor='none',
+                linestyle='dashed', transform=ccrs.PlateCarree(), zorder=10)
+            ax.add_patch(rect)
+            legend_handles.append(
+                mlines.Line2D([], [], color=color, linewidth=1.8,
+                              linestyle='dashed', label=label))
+
+    ax4_pos = axes[3].get_position()
+    axes[3].set_visible(False)
+
+    # Create a plain axes in the same spot
+    legend_ax = fig.add_axes(ax4_pos)
+    legend_ax.set_axis_off()
+    
+    # Draw proxy artists directly into that axes
+    for (lon0, lat0, dlon, dlat, color, label) in regions:
+        legend_ax.plot([], [], color=color, linewidth=1.8,
+                       linestyle='dashed', label=label)
+    
+    legend_ax.legend(loc='center', ncols=1, fontsize=11,
+                     framealpha=0.8, title='Regions', title_fontsize=11)
+    axes[3].set_visible(False)
+
+    if fig_label:
+        fig.text(0.5, -0.06, fig_label,
+                 ha='center', va='top', fontsize=9, wrap=True)
+
+    if to:
+        fig.savefig(f'figures/saves/{to}.png', dpi=300,
+                    bbox_inches='tight', pad_inches=0.1)
+    plt.show()
+
+
 def main():
-    ceres_syn = xr.load_dataset('raw_data/ceres_syn.nc')
-    ceres_syn['time'] = ceres_syn['time'] - pd.Timedelta(days=14) 
-    ceres_syn['cldarea_low_adj'] = utils.low_cloud_adj(ceres_syn)
+    era5_1deg = xr.open_dataset('clean_data/ccf_clouds_raw.nc')
+    
     # Take climatology
-    clim = ceres_syn.mean(dim='time')
+    clim = era5_1deg.mean(dim='time')
     utils.plot_scalar_field(clim['cldarea_low_adj'], cent_lon=0,
                             title='Climatological Low Cloud Cover')
     utils.plot_scalar_field(clim['cldarea_low_adj'] >= 50, cent_lon=0,
@@ -141,6 +254,8 @@ def main():
     # Vibes based boxes
     plot_field_patches(clim['cldarea_low_adj'], cent_lon=0,
                        title='Climatological Low Cloud Cover', cbar_lab='%')
+    plot_field_patches_4panel(clim['cldarea_low_adj'], 
+                              clim['eis'], clim['w_700'], cent_lon=0)
     # This information is now in utils.py
     # as the function get_stratocumulus_regions()
     # there is also a helper function to select data- region_sel()
