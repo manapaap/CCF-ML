@@ -46,6 +46,7 @@ from scipy import stats
 
 os.chdir('C:/Users/aakas/Documents/CCF-ML/')
 import scripts.utils as utils
+from string import ascii_lowercase as lowers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,9 +73,10 @@ UNITS = {
     'cldarea_low_adj': 'Low Cloud Cover (%)',
     'dCRE_net':        'Low CRE Net (W/m²)',
     'dCRE_amt':        'Low CRE Amount (W/m²)',
-    'dCRE_tau':        'Low CRE Tau (W/m²)',
+    'dCRE_tau':        'Low CRE Tau + Altitude (W/m²)',
     'dCRE_alt':        'Low CRE Alt (W/m²)',
     'lwp_low':         'Low LWP (g/m²)',
+    'lwp_tot':         'LWP (g/m²)'
 }
 
 
@@ -279,10 +281,10 @@ def _collect_region_data(ds, sc_regions, var_bin, var_del, target_var):
     """
     Extract flat arrays for each region and build an ALL aggregate.
 
-    For the ALL region the ESDOF ratio is a weighted average of per-region
-    ratios (weighted by n_obs). This is an approximation — if this analysis
-    reaches review, consider recomputing ESDOF directly from the combined
-    spatial field.
+    The ALL ESDOF ratio is computed directly from the combined spatial field
+    of all five regions concatenated along the lon axis, before flattening.
+    This is the correct treatment — the weighted-average approximation is no
+    longer used.
 
     Returns
     -------
@@ -292,11 +294,17 @@ def _collect_region_data(ds, sc_regions, var_bin, var_del, target_var):
     region_data = {}
 
     all_bin, all_del, all_target = [], [], []
-    total_obs      = 0
-    weighted_esdof = 0.0
+    all_da_del = []   # masked DataArrays for ALL ESDOF computation
+    total_obs  = 0
 
     for region, region_dict in sc_regions.items():
         print(f'  Extracting {region} ...', flush=True)
+
+        # Keep the masked regional DataArray for ALL ESDOF before flattening
+        ds_reg = utils.region_sel(ds, region_dict)
+        ds_reg = ds_reg.where(ds_reg['sst'].notnull())
+        all_da_del.append(ds_reg[var_del])
+
         arr_bin, arr_del, arr_target, esdof_ratio = extract_region_flat(
             ds, region_dict, var_bin, var_del, target_var
         )
@@ -308,11 +316,16 @@ def _collect_region_data(ds, sc_regions, var_bin, var_del, target_var):
         all_bin.append(arr_bin)
         all_del.append(arr_del)
         all_target.append(arr_target)
-        weighted_esdof += esdof_ratio * n
-        total_obs      += n
+        total_obs += n
 
-    # ALL aggregate
-    all_esdof = weighted_esdof / total_obs if total_obs > 0 else 1.0
+    # ALL ESDOF: concatenate masked regional fields along lon before computing.
+    # compute_esdof_ratio reshapes to (n_time, n_cells) and drops NaN cells,
+    # so concatenating along lon is equivalent to pooling all valid cells from
+    # all regions into a single spatial field.
+    print('  Computing ALL ESDOF from combined spatial field ...', flush=True)
+    da_all = xr.concat(all_da_del, dim='lon')
+    all_esdof = compute_esdof_ratio(da_all)
+
     region_data['ALL'] = (
         np.concatenate(all_bin),
         np.concatenate(all_del),
@@ -482,27 +495,23 @@ def plot_myers_norris(ds, sc_regions, var_bin, var_del, target_var,
 
     fig, axes = plt.subplots(2, 3, figsize=figsize, sharey=True)
     fig.subplots_adjust(hspace=0.35, wspace=0.08)
-
+    n = 0
     for ax, (region, (arr_bin, arr_del, arr_target, esdof_ratio)) in zip(
             axes.flat, region_data.items()):
         show_ylabel = ax in axes[:, 0]
+        region = lowers[n] + ') ' + region
         _plot_slope_panel(
             ax, arr_bin, arr_del, arr_target, esdof_ratio,
             region_label=region, xlabel=xlabel, ylabel=ylabel,
             n_bins=n_bins, show_ylabel=show_ylabel,
             var_del=var_del,
         )
+        n += 1
 
     # Hide the unused sixth panel if fewer than 6 entries
     for ax in axes.flat[len(region_data):]:
         ax.set_visible(False)
 
-    fig.suptitle(
-        f'∂({UNITS.get(target_var, target_var)}) / '
-        f'∂({UNITS.get(var_del, var_del)})  '
-        f'| binned by {UNITS.get(var_bin, var_bin)}',
-        fontsize=12,
-    )
     return fig, axes
 
 
@@ -604,8 +613,8 @@ def _collect_region_data_multi(ds, sc_regions, var_bin, var_del, target_vars):
 
     all_bin, all_del = [], []
     all_targets  = {tv: [] for tv in target_vars}
-    total_obs      = 0
-    weighted_esdof = 0.0
+    all_da_del   = []   # masked DataArrays for ALL ESDOF computation
+    total_obs    = 0
 
     for region, region_dict in sc_regions.items():
         print(f'  Extracting {region} ...', flush=True)
@@ -613,6 +622,9 @@ def _collect_region_data_multi(ds, sc_regions, var_bin, var_del, target_vars):
         # Spatial subset and land mask
         ds_reg = utils.region_sel(ds, region_dict)
         ds_reg = ds_reg.where(ds_reg['sst'].notnull())
+
+        # Collect masked DataArray for ALL ESDOF before flattening
+        all_da_del.append(ds_reg[var_del])
 
         # ESDOF once per region on var_del
         esdof_ratio = compute_esdof_ratio(ds_reg[var_del])
@@ -662,11 +674,14 @@ def _collect_region_data_multi(ds, sc_regions, var_bin, var_del, target_vars):
         all_del.append(arr_del_out)
         for tv in target_vars:
             all_targets[tv].append(targets_out[tv])
-        weighted_esdof += esdof_ratio * n
-        total_obs      += n
+        total_obs += n
 
-    # ALL aggregate — weighted-average ESDOF (see note in _collect_region_data)
-    all_esdof = weighted_esdof / total_obs if total_obs > 0 else 1.0
+    # ALL ESDOF: computed directly from the combined spatial field (same
+    # approach as _collect_region_data) rather than a weighted average.
+    print('  Computing ALL ESDOF from combined spatial field ...', flush=True)
+    da_all = xr.concat(all_da_del, dim='lon')
+    all_esdof = compute_esdof_ratio(da_all)
+
     region_data['ALL'] = {
         'arr_bin':     np.concatenate(all_bin),
         'arr_del':     np.concatenate(all_del),
@@ -812,15 +827,17 @@ def plot_myers_norris_multi(ds, sc_regions, var_bin, var_del, target_vars,
 
     fig, axes = plt.subplots(2, 3, figsize=figsize, sharey=True)
     fig.subplots_adjust(hspace=0.35, wspace=0.08)
-
+    n = 0
     for ax, (region, region_entry) in zip(axes.flat, region_data.items()):
         show_ylabel = ax in axes[:, 0]
+        region = lowers[n] + ') ' + region
         _plot_multi_slope_panel(
             ax, region_entry, target_vars, var_del,
             colors=colors, n_bins=n_bins,
             xlabel=xlabel, ylabel=ylabel,
             show_ylabel=show_ylabel, region_label=region,
         )
+        n += 1
 
     for ax in axes.flat[len(region_data):]:
         ax.set_visible(False)
@@ -832,13 +849,9 @@ def plot_myers_norris_multi(ds, sc_regions, var_bin, var_del, target_vars,
                    markersize=8, label=UNITS.get(tv, tv))
         for tv, c in zip(target_vars, colors)
     ]
-    fig.legend(handles=handles, loc='lower right',
-               bbox_to_anchor=(0.98, 0.02), fontsize=9, framealpha=0.8)
+    fig.legend(handles=handles, ncol=3,
+               bbox_to_anchor=(0.725, 0.05), fontsize=9, framealpha=0.8)
 
-    fig.suptitle(
-        f'∂(CRE) / ∂({del_unit})  |  binned by {UNITS.get(var_bin, var_bin)}',
-        fontsize=12,
-    )
     return fig, axes
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -847,10 +860,21 @@ def plot_myers_norris_multi(ds, sc_regions, var_bin, var_del, target_vars,
 
 def main():
     ceres_clean = xr.open_dataset('clean_data/ccf_cre_clean.nc')
+    ceres_raw = xr.open_dataset('clean_data/ccf_clouds_raw.nc')
     sc_regions  = utils.get_stratocumulus_regions()
 
     fig1, _ = plot_myers_norris(
         ds=ceres_clean, sc_regions=sc_regions,
+        var_bin='eis', var_del='w_700', target_var='cldarea_low_adj',
+        n_bins=9,
+    )
+    fig15, _ = plot_myers_norris(
+        ds=ceres_clean, sc_regions=sc_regions,
+        var_bin='eis', var_del='w_700', target_var='lwp_tot',
+        n_bins=9,
+    )
+    fig175, _ = plot_myers_norris(
+        ds=ceres_raw, sc_regions=sc_regions,
         var_bin='eis', var_del='w_700', target_var='cldarea_low_adj',
         n_bins=9,
     )

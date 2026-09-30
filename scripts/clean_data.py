@@ -74,7 +74,6 @@ def plcl(T, p, Tl):
 # =========================
 
 def EIS(Ts, T700):
-
     # Lower tropospheric stability
     LTS = theta(T700, 700) - theta(Ts, 1000)
 
@@ -84,7 +83,8 @@ def EIS(Ts, T700):
 
     # Heights (hypsometric, same structure)
     z700 = (Rd * T700 / g) * np.log(1000 / 700)
-    zlcl = (Rd * Ts / g) * np.log(1000 / 700)
+    # I had 700 here instead of p_lcl
+    zlcl = (Rd * Ts / g) * np.log(1000 / p_lcl)
 
     # Temperature at 850 hPa (same midpoint approximation used in climlab)
     T850 = (Ts + T700) / 2.
@@ -195,10 +195,10 @@ def detrend_dim(da, dim='time', deg=1):
 
 
 def main():
-    global ceres_syn, era5_sing, era5_1deg
     # Load files
     # ceres_hist = xr.load_dataset('raw_data/ceres_hist.nc')
     ceres_syn = xr.load_dataset('raw_data/ceres_syn_new.nc')
+    ceres_ebaf = xr.load_dataset('raw_data/ceres_ebaf_cre.nc')
     era5_pres = xr.load_dataset('raw_data/era5_pres.nc').\
         drop_vars(['expver', 'number']).\
         rename({'valid_time': 'time',
@@ -217,13 +217,14 @@ def main():
         sel({'time':era5_sing.time})
     # Adjust ceres-syn time to start at 0
     ceres_syn['time'] = ceres_syn['time'] - pd.Timedelta(days=14) 
+    ceres_ebaf['time'] = ceres_ebaf['time'] - pd.Timedelta(days=14)
     # Create adjusted low cloud cover variable and ln(AOD)
     ceres_syn['cldarea_low_adj'] = utils.low_cloud_adj(ceres_syn)
     ceres_syn['ln_AOD'] = np.log(ceres_syn['ini_aod55_mon'])
     # Now, for ERA5, calculate cold advection, EIS, and WindSpeed
     era5_sing['eis'] = calc_eis(era5_pres)
     era5_sing['speed'] = np.hypot(era5_sing['u10'], era5_sing['v10'])
-    era5_sing['cold_adv'] = cold_adv_periodic(era5_sing)
+    era5_sing['Tadv'] = cold_adv_periodic(era5_sing)
     era5_sing['w_700'] = era5_pres['w'].sel(pressure_level=700)
     era5_sing['rh_700'] = era5_pres['r'].sel(pressure_level=700)
     era5_sing = era5_sing.drop_vars('pressure_level')
@@ -240,8 +241,12 @@ def main():
     # Transfer CERES variables of intrest
     era5_1deg['cldarea_low_adj'] = ceres_syn['cldarea_low_adj']
     era5_1deg['cldarea_high'] = ceres_syn['cldarea_high_mon']
+    era5_1deg['cldtau_low'] = ceres_syn['cldtau_low_mon']
     era5_1deg['ln_AOD'] = ceres_syn['ln_AOD']
     era5_1deg['lwp_low'] = ceres_syn['lwp_low_mon']
+    era5_1deg['lwp_tot'] = ceres_syn['lwp_total_mon']
+    era5_1deg['toa_cre'] = ceres_ebaf['toa_cre_net_mon']
+    era5_1deg['sfc_cre'] = ceres_ebaf['sfc_cre_net_tot_mon']
     # save seasonal cycle data too
     era5_1deg.to_netcdf('clean_data/ccf_clouds_raw.nc')
     # deseasonalize 
@@ -253,19 +258,24 @@ def main():
     
     # In clean_fbct, we got cleaned low cloud CRE
     # Will the model results be any different?
-    low_cre = xr.open_dataset('clean_data/low_cloud_cre_terra.nc').\
-        drop_vars(['albcs', 'month'])
+    # low_cre = xr.open_dataset('clean_data/low_cloud_cre_terra.nc').\
+    #    drop_vars(['albcs', 'month'])
+    low_cre = xr.open_dataset('clean_data/low_cloud_cre_direct_merged.nc')
     low_cre['time'] = low_cre['time'] - pd.Timedelta(days=14) 
+    # select common times
+    common_times = np.intersect1d(low_cre.time, era5_1deg.time)
+    low_cre = low_cre.sel(time=common_times)
+    era5_1deg = era5_1deg.sel(time=common_times)
     # regrid era5 to 2.5 degree and transfer variables
     regridder = xe.Regridder(era5_1deg[['lat', 'lon']],
                              low_cre[['lat', 'lon']],
                              "bilinear", periodic=True)
     era5_25deg = regridder(era5_1deg.copy()) 
     era5_25deg = era5_25deg.sel(time=low_cre.time)
-    era5_25deg['dCRE_net'] = low_cre['dCRE_net']
-    era5_25deg['dCRE_amt'] = low_cre['dCRE_amount']
-    era5_25deg['dCRE_tau'] = low_cre['dCRE_tau']
-    era5_25deg['dCRE_alt'] = low_cre['dCRE_altitude']
+    # Fix sign error
+    era5_25deg['dCRE_net'] = -1 * low_cre['dCRE_net']
+    era5_25deg['dCRE_amt'] = -1 * low_cre['dCRE_amount']
+    era5_25deg['dCRE_tau'] = -1 * low_cre['dCRE_shape']
     # Save final file
     era5_25deg.to_netcdf('clean_data/ccf_cre_clean.nc')
     

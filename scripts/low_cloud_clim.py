@@ -251,6 +251,9 @@ def main():
                             title='Climatological Low Cloud Cover')
     utils.plot_scalar_field(clim['cldarea_low_adj'] >= 50, cent_lon=0,
                             title='Low Cloud Cover > 50%')
+    # Select regions over ocean
+    ocean = clim['sst'].notnull()
+    clim = clim.where(ocean==True)
     # Vibes based boxes
     plot_field_patches(clim['cldarea_low_adj'], cent_lon=0,
                        title='Climatological Low Cloud Cover', cbar_lab='%')
