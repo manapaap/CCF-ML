@@ -57,7 +57,7 @@ from scripts.ccf_ml_shared import (
 
 # Low Cloud CRE Alternative:
 DATA_FILE  = 'clean_data/ccf_cre_clean.nc'
-RUN_LABEL  = 'CRE_net'
+RUN_LABEL  = 'mcao'
 
 # ── Model type ────────────────────────────────
 # 'rf'  — Random Forest (supports varimp)
@@ -70,7 +70,8 @@ MODEL_TYPE = 'rf'
 PARAM_SUBDIR = f'misc/hyperparams/{RUN_LABEL}_{MODEL_TYPE}'
 
 # ── Model / CV settings ───────────────────────
-TARGET_COL  = 'dCRE_net'
+# cldarea_low_adj
+TARGET_COL  = 'cldarea_low_adj'
 DROP_VARS   = ['u10', 'v10', 'msl']
 TEMP_SPLIT  = 0.8
 N_FOLDS     = 5
@@ -78,7 +79,7 @@ BLOCK_SIZE  = 5
 N_ITER      = 30
 INNER_FOLDS = 3
 
-FEATURE_COLS = ['sst', 'eis', 'speed', 'Tadv',
+FEATURE_COLS = ['sst', 'mcao', 'speed', 'Tadv',
                 'w_700', 'ln_AOD', 'rh_700', 'cldarea_high']
 
 # ── 2D PDP pairs to generate ─────────────────

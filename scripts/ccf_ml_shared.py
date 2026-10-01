@@ -608,9 +608,9 @@ def plot_pdp(models, feature_cols, target_var, units=None, title=None,
                             transform=ax.get_xaxis_transform())
 
         ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.5)
-        ax.set_xlabel(lowers[i] + ') ' + units.get(feat, feat), fontsize=10)
-        ax.set_ylabel(f"Δ {units.get(target_var, target_var)}", fontsize=10)
-        ax.tick_params(labelsize=9)
+        ax.set_xlabel(lowers[i] + ') ' + units.get(feat, feat), fontsize=13)
+        ax.set_ylabel(f"Δ {units.get(target_var, target_var)}", fontsize=13)
+        ax.tick_params(labelsize=11)
         ax.grid(True, alpha=0.3)
 
     for ax in axes_flat[n_features:]:
@@ -621,7 +621,7 @@ def plot_pdp(models, feature_cols, target_var, units=None, title=None,
 
     fig.legend(legend_handles, legend_labels,
                loc='lower center', ncol=len(models),
-               fontsize=10, framealpha=0.7,
+               fontsize=12, framealpha=0.7,
                bbox_to_anchor=(0.5, -0.06))
 
     if xlabel:

@@ -141,16 +141,16 @@ def plot_subsidence_cre_pdp(ccf_data, sc_regions, figsize=(15, 4.5)):
                 legend_handles.append(line)
 
         ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.5)
-        ax.set_title(f'{lowers[j]}) {panel_title}', fontsize=11)
-        ax.set_xlabel(UNITS.get(PDP_VAR, PDP_VAR), fontsize=10)
+        ax.set_title(f'{lowers[j]}) {panel_title}', fontsize=14)
+        ax.set_xlabel(UNITS.get(PDP_VAR, PDP_VAR), fontsize=13)
         if j == 0 or not SHARE_Y:
-            ax.set_ylabel('Δ Low Cloud CRE (W/m²)', fontsize=10)
-        ax.tick_params(labelsize=9)
+            ax.set_ylabel('Δ Low Cloud CRE (W/m²)', fontsize=13)
+        ax.tick_params(labelsize=11)
         ax.grid(True, alpha=0.3)
 
     fig.legend(legend_handles, [h.get_label() for h in legend_handles],
                loc='lower center', ncol=len(legend_handles),
-               fontsize=10, framealpha=0.7,
+               fontsize=12, framealpha=0.7,
                bbox_to_anchor=(0.5, -0.08))
 
     plt.tight_layout()

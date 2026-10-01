@@ -184,7 +184,7 @@ def extract_region_flat(ds, region_dict, var_bin, var_del, target_var):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def compute_slopes(arr_bin, arr_del, arr_target, esdof_ratio, n_bins=9,
-                   var_del=None, bin_edges=None):
+                   var_del=None, bin_edges=None, conf=0.95):
     """
     Equal-width bins on arr_bin. Within each bin, split on within-bin
     median of arr_del (high vs low). Estimate finite-difference slope and
@@ -195,12 +195,14 @@ def compute_slopes(arr_bin, arr_del, arr_target, esdof_ratio, n_bins=9,
     bin_edges : np.ndarray, optional
         Pre-computed bin edges for arr_bin. If provided, n_bins is ignored.
         Allows multiple target_vars to share identical bin positions.
+    conf : float
+        Two-sided confidence level for the error bars (MN13 used 0.90).
 
     Returns
     -------
     bin_centers : (n_bins,)  median of var_bin per bin
     slopes      : (n_bins,)
-    errors      : (n_bins,)  95% CI half-width
+    errors      : (n_bins,)  CI half-width at level conf
     n_bins_obs  : (n_bins,)  raw observation count
     bin_edges   : (n_bins+1,) bin edges used (for reuse by caller)
     """
@@ -266,7 +268,7 @@ def compute_slopes(arr_bin, arr_del, arr_target, esdof_ratio, n_bins=9,
 
         # ESDOF-adjusted bin sample size
         n_eff_bin = max(n_bin * esdof_ratio, 2.0)
-        t_crit    = stats.t.ppf(0.975, df=max(n_eff_bin - 2, 1.0))
+        t_crit    = stats.t.ppf(0.5 + conf / 2, df=max(n_eff_bin - 2, 1.0))
 
         errors[i] = t_crit * (pooled_std / np.sqrt(n_eff_bin)) / np.abs(delta_del)
 

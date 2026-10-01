@@ -166,6 +166,30 @@ def calc_eis(era5_eis):
     return eis
 
 
+def calc_mcao(era5_eis):
+    """
+    Calculates Marine Cold Air Outbreak (MCAO) index
+    https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2020JD032465
+    """
+    t_800 = era5_eis.sel(pressure_level=800)['t']
+    t_1000 = era5_eis.sel(pressure_level=1000)['t']
+    
+    MCAO = -theta(t_800, 700) + theta(t_1000, 1000)
+    
+    return MCAO
+
+
+def calc_ectei(era5_sing, era5_pres):
+    """
+    Calculates ECTEI, EIS with relative humidity correction
+    https://journals.ametsoc.org/view/journals/clim/30/22/jcli-d-16-0825.1.xml
+    """
+    q_diff = 0.23 * (Lhvap / cp) * (era5_pres['q'].sel(pressure_level=1000) -\
+                                    era5_pres['q'].sel(pressure_level=700))
+    ECTEI = era5_sing['eis'] - q_diff
+    return ECTEI
+
+
 def deseasonalize(xr_ds):
     """
     Removes seasonal cycle by subtracting monthly mean climatology
@@ -223,9 +247,12 @@ def main():
     ceres_syn['ln_AOD'] = np.log(ceres_syn['ini_aod55_mon'])
     # Now, for ERA5, calculate cold advection, EIS, and WindSpeed
     era5_sing['eis'] = calc_eis(era5_pres)
+    era5_sing['ectei'] = calc_ectei(era5_sing, era5_pres)
+    era5_sing['mcao'] = calc_mcao(era5_pres)
     era5_sing['speed'] = np.hypot(era5_sing['u10'], era5_sing['v10'])
     era5_sing['Tadv'] = cold_adv_periodic(era5_sing)
     era5_sing['w_700'] = era5_pres['w'].sel(pressure_level=700)
+    era5_sing['w_500'] = era5_pres['w'].sel(pressure_level=500)
     era5_sing['rh_700'] = era5_pres['r'].sel(pressure_level=700)
     era5_sing = era5_sing.drop_vars('pressure_level')
     # Calculate pseudo-advection terms
