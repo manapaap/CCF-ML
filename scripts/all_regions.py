@@ -57,7 +57,7 @@ from scripts.ccf_ml_shared import (
 
 # Low Cloud CRE Alternative:
 DATA_FILE  = 'clean_data/ccf_cre_clean.nc'
-RUN_LABEL  = 'mcao'
+RUN_LABEL  = 'deseasonalized'
 
 # ── Model type ────────────────────────────────
 # 'rf'  — Random Forest (supports varimp)
@@ -79,7 +79,7 @@ BLOCK_SIZE  = 5
 N_ITER      = 30
 INNER_FOLDS = 3
 
-FEATURE_COLS = ['sst', 'mcao', 'speed', 'Tadv',
+FEATURE_COLS = ['sst', 'eis', 'speed', 'Tadv',
                 'w_700', 'ln_AOD', 'rh_700', 'cldarea_high']
 
 # ── 2D PDP pairs to generate ─────────────────
@@ -94,7 +94,7 @@ UNITS = {
     'eis':             'EIS (K)',
     'speed':           '10m Windspeed (m/s)',
     'Tadv':        'Temperature Advection (K/day)',
-    'w_700':           'Subsidence (Pa/s)',
+    'w_700':           '$ω_{700}$ (Pa/s)',
     'ln_AOD':          'ln(AOD)',
     'rh_700':          '700 hPa RH (%)',
     'cldarea_high':    'Cirrus Cover (%)',

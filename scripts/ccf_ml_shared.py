@@ -609,12 +609,18 @@ def plot_pdp(models, feature_cols, target_var, units=None, title=None,
 
         ax.axhline(0, color='k', linewidth=0.8, linestyle='--', alpha=0.5)
         ax.set_xlabel(lowers[i] + ') ' + units.get(feat, feat), fontsize=13)
-        ax.set_ylabel(f"Δ {units.get(target_var, target_var)}", fontsize=13)
+        # y label on the leftmost column only; y limits stay independent.
+        # Units go on a second line so long labels fit the row height.
+        if i % n_cols == 0:
+            ylabel = f"Δ {units.get(target_var, target_var)}"
+            ax.set_ylabel(ylabel.replace(' (', '\n('), fontsize=13)
         ax.tick_params(labelsize=11)
         ax.grid(True, alpha=0.3)
 
     for ax in axes_flat[n_features:]:
         ax.set_visible(False)
+
+    fig.align_ylabels(axes_flat[::n_cols])
 
     if title:
         fig.suptitle(title, fontsize=14, fontweight='bold', y=1.01)

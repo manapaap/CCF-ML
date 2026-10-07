@@ -46,15 +46,16 @@ def progress_bar(n, max_val, cus_str=''):
           end="\r") 
     
     
-def low_cloud_adj(ceres_syn, include_mid=False):
+def low_cloud_adj(ceres_syn, include_mid=True):
     """
     Calculates adjusted low cloud amount (%) assuming random overlap with
     higher clouds.
     """
-    high_area = (ceres_syn['cldarea_high_mon'])
-    
+    high_area = ceres_syn['cldarea_high_mon']
+
     if include_mid:
-        high_area += ceres_syn['cldarea_mid_low_mon'] +\
+        # Not +=: that would modify cldarea_high_mon in ceres_syn in place
+        high_area = high_area + ceres_syn['cldarea_mid_low_mon'] +\
             ceres_syn['cldarea_mid_high_mon']
 
     denom = 100 - high_area
@@ -62,6 +63,106 @@ def low_cloud_adj(ceres_syn, include_mid=False):
     low_adj = ceres_syn['cldarea_low_mon'] / denom
 
     return xr.where(denom > 1, 100 * low_adj, np.nan)
+
+
+# CERES-FBCT cloud-top pressure bins (press index): 0-1 have CTP > 680 hPa
+FBCT_LOW_PRESS  = [0, 1]
+FBCT_HIGH_PRESS = [2, 3, 4, 5, 6]
+FBCT_DIRS = {'terra': 'raw_data/ceres_fbct_terra',
+             'noaa':  'raw_data/ceres_fbct_noaa'}
+
+
+def _fbct_cf(directory):
+    """FBCT cloud area [%] (opt, press, time, lat, lon) for one record."""
+    import glob, os
+    files = sorted(glob.glob(os.path.join(directory, '*.nc')))
+    cf = xr.open_mfdataset(files, combine='by_coords')['cldarea_cldtyp_mon']
+    return cf.where(cf != -999.0)
+
+
+def _fbct_sums(directory):
+    """Low (L) and upper-level (U) cloud area [%] from one FBCT record."""
+    cf = _fbct_cf(directory)
+    return xr.Dataset({
+        'L': cf.isel(press=FBCT_LOW_PRESS).sum(['opt', 'press'], min_count=1),
+        'U': cf.isel(press=FBCT_HIGH_PRESS).sum(['opt', 'press'], min_count=1),
+    }).load()
+
+
+def _merge_fbct_records(terra, noaa):
+    """
+    Join Terra/Aqua MODIS and NOAA-20 VIIRS: remove the NOAA-minus-Terra
+    mean difference for each calendar month over their overlap from NOAA,
+    then average the two where both exist. Returns (merged, n_overlap).
+    """
+    overlap = np.intersect1d(terra['time'], noaa['time'])
+    diff = (noaa.sel(time=overlap) - terra.sel(time=overlap))
+    offset = diff.groupby('time.month').mean('time')
+    noaa = (noaa.groupby('time.month') - offset).drop_vars('month')
+
+    terra, noaa = xr.align(terra, noaa, join='outer')
+    out = xr.concat([terra, noaa], dim='sat').mean('sat', skipna=True)
+    return out.clip(0, 100), len(overlap)  # offset removal can pass 100
+
+
+def fbct_press_profile(cache='clean_data/fbct_press_1deg.nc'):
+    """
+    CERES-FBCT cloud area [%] in each of the 7 cloud-top pressure layers,
+    summed over optical depth, on the native 1° grid (time, press, lat, lon).
+
+    Layers (press index): 0: 1000-800, 1: 800-680, 2: 680-560,
+    3: 560-440, 4: 440-310, 5: 310-180, 6: 180-10 hPa. Terra and NOAA
+    records merged as in fbct_low_high. Cached.
+    """
+    import os
+    if os.path.isfile(cache):
+        return xr.open_dataset(cache)['cf']
+    recs = [_fbct_cf(FBCT_DIRS[s]).sum('opt', min_count=1).load()
+            .to_dataset(name='cf') for s in ('terra', 'noaa')]
+    out, _ = _merge_fbct_records(*recs)
+    out['cf'].attrs = {'units': '%', 'long_name': 'FBCT cloud area by CTP layer'}
+    out.to_netcdf(cache)
+    return out['cf']
+
+
+def fbct_low_high(cache='clean_data/fbct_low_high_1deg.nc', u_cap=90.0):
+    """
+    Low and high cloud cover [%] on the native 1° grid from CERES-FBCT,
+    following Scott et al. (2020):
+
+        U   : upper-level cloud, all cloud with CTP < 680 hPa
+        L   : low cloud visible from above, CTP > 680 hPa
+        L_n : nonobscured low cloud, L / (1 - U) (random overlap)
+
+    U is capped at u_cap (as HIGH_CF_CAP in clean_fbct_new.py) in the L_n
+    denominator only.
+
+    The Terra/Aqua MODIS (2002-07 to 2023-02) and NOAA-20 VIIRS (2018-05
+    onward) records are joined by removing the NOAA-minus-Terra mean
+    difference for each calendar month over their overlap from NOAA, then
+    averaging the two where both exist. Cached because the raw files are
+    several GB.
+
+    Returns
+    -------
+    xr.Dataset (time, lat, lon) with 'L', 'U', 'L_n'
+    """
+    import os
+    if os.path.isfile(cache):
+        return xr.open_dataset(cache)
+
+    terra = _fbct_sums(FBCT_DIRS['terra'])
+    noaa  = _fbct_sums(FBCT_DIRS['noaa'])
+
+    out, n_overlap = _merge_fbct_records(terra, noaa)
+    out['L_n'] = (100 * out['L'] / (100 - out['U'].clip(max=u_cap))).clip(max=100)
+    for v, name in (('L', 'low cloud (CTP > 680 hPa), visible'),
+                    ('U', 'upper-level cloud (CTP < 680 hPa)'),
+                    ('L_n', 'nonobscured low cloud L/(1-U), S20')):
+        out[v].attrs = {'units': '%', 'long_name': name}
+    out.attrs['overlap_months'] = int(n_overlap)
+    out.to_netcdf(cache)
+    return out
 
 
 def plot_scalar_field(data, title='', cbar_lab='',

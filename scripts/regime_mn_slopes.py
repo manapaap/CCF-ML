@@ -9,6 +9,8 @@ rather than the five hand-drawn stratocumulus boxes:
     a) MN13 subsidence regime (30°S-30°N, only months with ω700 > 0)
     b) S20 stratocumulus      (ω700 > 15 hPa/day, EIS > 1 K)
     c) S20 trade cumulus      (ω700 > 0, EIS < 1 K)
+    d) S20 tropical ascent    (|lat| < 25°, ω700 < 0)
+    e) S20 mid-latitude       (remaining 60°S-60°N ocean)
 
 Anomalies (deseasonalized, detrended) come from clean_data/ccf_cre_clean.nc.
 Within each EIS-anomaly interval, grid-box-months are split at the median
@@ -22,7 +24,7 @@ Choices matched to MN13 (Fig. 4c and Table 2):
     - no percentile clipping of the CCFs
     - an overall ∂/∂ω700|EIS averaged over intervals weighted by count
 
-Produces two figures (1 x 3, one panel per mask):
+Produces two figures (2 x 3, one panel per mask):
     figures/regime_mn_cf.png   : ∂(low cloud fraction)/∂(ω700)
     figures/regime_mn_cre.png  : ∂(CRE)/∂(ω700) for net, amount, tau+alt
 and a CSV of the per-interval slopes in misc/.
@@ -68,6 +70,8 @@ MASKS = [
     ('mask_mn13',   'MN13 Subsidence Regime', True),
     ('mask_s20_sc', 'S20 Stratocumulus',      False),
     ('mask_s20_cu', 'S20 Trade Cumulus',      False),
+    ('mask_s20_ta', 'S20 Tropical Ascent',    False),
+    ('mask_s20_ml', 'S20 Mid-Latitude',       False),
 ]
 
 CRE_COLORS = ['k', 'tab:blue', 'tab:red']
@@ -181,7 +185,6 @@ def plot_panel(ax, entry, target_vars, colors, title):
     for edge in BIN_EDGES:
         ax.axvline(edge, color='k', lw=0.4, ls=':', alpha=0.4)
 
-    summary = []
     for tv, color, offset in zip(target_vars, colors, offsets):
         centers, slopes, errors, n_obs, _ = compute_slopes(
             entry['arr_bin'], entry['arr_del'], entry['targets'][tv],
@@ -200,16 +203,6 @@ def plot_panel(ax, entry, target_vars, colors, title):
                    edgecolors='k', linewidths=0.5, zorder=3,
                    label=UNITS.get(tv, tv))
 
-        mean, ci = weighted_mean_slope(slopes, errors, n_obs)
-        summary.append((color, f'{mean:+.2f} ± {ci:.2f}'))
-
-    # Overall weighted-mean partial derivative, one line per target
-    for k, (color, text) in enumerate(summary):
-        ax.text(0.03, 0.96 - 0.07 * k, text, transform=ax.transAxes,
-                color=color, fontsize=11, va='top',
-                bbox=dict(facecolor='white', edgecolor='none', alpha=0.7,
-                          pad=1))
-
     ax.set_title(f'{title}\n({entry["n_cells"]} grid boxes, '
                  f'ESDOF ratio {entry["esdof_ratio"]:.2f})', fontsize=12)
     ax.set_xlabel('EIS anomaly (K)', fontsize=13)
@@ -220,20 +213,25 @@ def plot_panel(ax, entry, target_vars, colors, title):
 
 
 def plot_regime_slopes(entries, target_vars, ylabel, colors=None,
-                       figsize=(16, 5)):
+                       n_cols=3, figsize=(16, 10)):
     colors = colors or ['k'] * len(target_vars)
-    fig, axes = plt.subplots(1, len(MASKS), figsize=figsize, sharey=True)
+    n_rows = int(np.ceil(len(MASKS) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True)
+    axes_flat = axes.flatten()
 
-    for j, (ax, (mask_name, title, _)) in enumerate(zip(axes, MASKS)):
+    for j, (ax, (mask_name, title, _)) in enumerate(zip(axes_flat, MASKS)):
         plot_panel(ax, entries[mask_name], target_vars, colors,
                    f'{lowers[j]}) {title}')
-    axes[0].set_ylabel(ylabel, fontsize=13)
+    for ax in axes_flat[::n_cols]:
+        ax.set_ylabel(ylabel, fontsize=13)
 
+    # The spare panel(s) hold the legend
+    for ax in axes_flat[len(MASKS):]:
+        ax.axis('off')
     if len(target_vars) > 1:
-        handles, labels = axes[0].get_legend_handles_labels()
-        fig.legend(handles, labels, loc='lower center',
-                   ncol=len(target_vars), fontsize=12, framealpha=0.8,
-                   bbox_to_anchor=(0.5, -0.1))
+        handles, labels = axes_flat[0].get_legend_handles_labels()
+        axes_flat[-1].legend(handles, labels, loc='center', fontsize=12,
+                             framealpha=0.8)
 
     plt.tight_layout()
     return fig, axes

@@ -81,8 +81,10 @@ def EIS(Ts, T700):
     T_lcl = Tlcl(Ts, 0.8)
     p_lcl = plcl(Ts, 1000, T_lcl)
 
-    # Heights (hypsometric, same structure)
-    z700 = (Rd * T700 / g) * np.log(1000 / 700)
+    # Heights (hypsometric). As in climlab, both use the scale height of the
+    # surface temperature; z700 previously used T700, which put z700 ~150 m
+    # too low and EIS ~0.7 K too high.
+    z700 = (Rd * Ts / g) * np.log(1000 / 700)
     # I had 700 here instead of p_lcl
     zlcl = (Rd * Ts / g) * np.log(1000 / p_lcl)
 
@@ -95,7 +97,6 @@ def EIS(Ts, T700):
 
     # Final EIS
     return LTS - Gammam * (z700 - zlcl)
-
 
 
 def cold_adv_periodic(era5_data):
@@ -154,15 +155,19 @@ def prop_adv_periodic(era5_data, era5_925, var='eis'):
     return var_adv
 
 
-def calc_eis(era5_eis):
+def calc_eis(era5_eis, sst):
     """
     Calculates estimated inversion strength of dataarray and returns the same,
     per Wood, 2006. Uses climlab.utils.thermo.
+
+    The surface temperature is SST, as in Wood & Bretherton (2006), MN13 and
+    S20 (NaN over land). The 1000 hPa air temperature used previously is
+    ~2.3 K colder over the oceans and inflated d(CF)/d(EIS) from ~2.8 to
+    ~4.1 %/K in the MN13 regime.
     """
     t_700 = era5_eis.sel(pressure_level=700)['t']
-    t_1000 = era5_eis.sel(pressure_level=1000)['t']
     # climlab EIS
-    eis = EIS(t_1000, t_700)
+    eis = EIS(sst, t_700)
     return eis
 
 
@@ -174,7 +179,7 @@ def calc_mcao(era5_eis):
     t_800 = era5_eis.sel(pressure_level=800)['t']
     t_1000 = era5_eis.sel(pressure_level=1000)['t']
     
-    MCAO = -theta(t_800, 700) + theta(t_1000, 1000)
+    MCAO = -theta(t_800, 800) + theta(t_1000, 1000)
     
     return MCAO
 
@@ -233,12 +238,7 @@ def main():
         rename({'valid_time': 'time',
                 'latitude': 'lat',
                 'longitude': 'lon'})
-    era5_925 = xr.load_dataset('raw_data/era5_925.nc').\
-        drop_vars(['expver', 'number']).\
-        rename({'valid_time': 'time',
-                'latitude': 'lat',
-                'longitude': 'lon'}).\
-        sel({'time':era5_sing.time})
+
     # Adjust ceres-syn time to start at 0
     ceres_syn['time'] = ceres_syn['time'] - pd.Timedelta(days=14) 
     ceres_ebaf['time'] = ceres_ebaf['time'] - pd.Timedelta(days=14)
@@ -246,7 +246,7 @@ def main():
     ceres_syn['cldarea_low_adj'] = utils.low_cloud_adj(ceres_syn)
     ceres_syn['ln_AOD'] = np.log(ceres_syn['ini_aod55_mon'])
     # Now, for ERA5, calculate cold advection, EIS, and WindSpeed
-    era5_sing['eis'] = calc_eis(era5_pres)
+    era5_sing['eis'] = calc_eis(era5_pres, era5_sing['sst'])
     era5_sing['ectei'] = calc_ectei(era5_sing, era5_pres)
     era5_sing['mcao'] = calc_mcao(era5_pres)
     era5_sing['speed'] = np.hypot(era5_sing['u10'], era5_sing['v10'])
@@ -255,19 +255,25 @@ def main():
     era5_sing['w_500'] = era5_pres['w'].sel(pressure_level=500)
     era5_sing['rh_700'] = era5_pres['r'].sel(pressure_level=700)
     era5_sing = era5_sing.drop_vars('pressure_level')
-    # Calculate pseudo-advection terms
-    era5_sing['deis_ds'] = prop_adv_periodic(era5_sing, era5_925, var='eis')
-    era5_sing['drh_700_ds'] = prop_adv_periodic(era5_sing, era5_925, var='rh_700')
-    era5_sing['dspeed_ds'] = prop_adv_periodic(era5_sing, era5_925, var='speed')
-    era5_sing['dw_700_ds'] = prop_adv_periodic(era5_sing, era5_925, var='w_700')
+    
     # regrid ERA5 to CERES grid
     regridder = xe.Regridder(era5_sing[['lat', 'lon']],
                              ceres_syn[['lat', 'lon']],
                              "bilinear", periodic=True)
     era5_1deg = regridder(era5_sing.copy())  
+    # Low and high cloud from CERES-FBCT, S20 definitions (same 1° grid and
+    # mid-month timestamps as CERES-SYN; record starts 2002-07):
+    # cldarea_low_adj = nonobscured low cloud L/(1-U), cldarea_high = U
+    fbct = utils.fbct_low_high()
+    fbct['time'] = fbct['time'] - pd.Timedelta(days=14)
+    fbct = fbct.reindex(time=era5_1deg.time)
     # Transfer CERES variables of intrest
-    era5_1deg['cldarea_low_adj'] = ceres_syn['cldarea_low_adj']
-    era5_1deg['cldarea_high'] = ceres_syn['cldarea_high_mon']
+    era5_1deg['cldarea_low_adj'] = fbct['L_n']
+    era5_1deg['cldarea_low_vis'] = fbct['L']
+    era5_1deg['cldarea_high'] = fbct['U']
+    # CERES-SYN versions kept for comparison
+    era5_1deg['cldarea_low_syn'] = ceres_syn['cldarea_low_adj']
+    era5_1deg['cldarea_high_syn'] = ceres_syn['cldarea_high_mon']
     era5_1deg['cldtau_low'] = ceres_syn['cldtau_low_mon']
     era5_1deg['ln_AOD'] = ceres_syn['ln_AOD']
     era5_1deg['lwp_low'] = ceres_syn['lwp_low_mon']

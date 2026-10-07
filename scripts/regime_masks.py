@@ -14,8 +14,13 @@ monthly means, following:
     S20  : Scott et al. (2020), J. Climate 33, 7717-7734
            Ocean grid boxes within 60°S-60°N classified with ANNUAL MEAN
            climatological thresholds:
-             stratocumulus : ω700 > 15 hPa/day and EIS > 1 K
-             trade cumulus : ω700 > 0  hPa/day and EIS < 1 K
+             stratocumulus  : ω700 > 15 hPa/day and EIS > 1 K
+             trade cumulus  : ω700 > 0  hPa/day and EIS < 1 K
+             tropical ascent: equatorward of 25° with ω700 < 0
+             mid-latitude   : all remaining grid boxes (e.g. poleward of
+                              25° with ω700 < 15 hPa/day and EIS > 1 K, or
+                              ω700 < 0)
+           The four S20 regimes partition the 60°S-60°N ocean.
 
 Workflow
 --------
@@ -28,7 +33,7 @@ Workflow
    the absolute S20 threshold EIS > 1 K select far too many grid boxes.)
 3. Conservatively regrid EIS and ω700 from 0.25° to the 2.5° grid of
    clean_data/ccf_cre_clean.nc
-4. Build the monthly climatology, annual mean, and the three masks
+4. Build the monthly climatology, annual mean, and the masks
 5. Save everything to clean_data/regime_masks.nc and plot the masks
 
 Run from the CCF-ML root (xesmf needs ESMFMKFILE set if the conda env
@@ -76,11 +81,14 @@ S20_LAT_MAX  = 60.0
 S20_SC_W700  = 15.0      # hPa/day
 S20_EIS_THR  = 1.0       # K
 S20_CU_W700  = 0.0       # hPa/day
+S20_TA_LAT   = 25.0      # tropical ascent: |lat| < 25° and ω700 < 0
 
 MASK_LABELS = {
     'mask_mn13':   'MN13 subsidence regime',
     'mask_s20_sc': 'S20 stratocumulus',
     'mask_s20_cu': 'S20 trade cumulus',
+    'mask_s20_ta': 'S20 tropical ascent',
+    'mask_s20_ml': 'S20 mid-latitude',
 }
 
 # ═════════════════════════════════════════════
@@ -178,11 +186,16 @@ def build_masks(ds, ocean_frac):
                    & (clim_ann['eis'] > S20_EIS_THR))
     mask_s20_cu = (in_s20 & (clim_ann['w_700'] > S20_CU_W700)
                    & (clim_ann['eis'] < S20_EIS_THR))
+    mask_s20_ta = (in_s20 & ~mask_s20_sc & ~mask_s20_cu
+                   & (abs_lat < S20_TA_LAT) & (clim_ann['w_700'] < 0))
+    mask_s20_ml = in_s20 & ~mask_s20_sc & ~mask_s20_cu & ~mask_s20_ta
 
     masks = xr.Dataset({
         'mask_mn13':   mask_mn13,
         'mask_s20_sc': mask_s20_sc,
         'mask_s20_cu': mask_s20_cu,
+        'mask_s20_ta': mask_s20_ta,
+        'mask_s20_ml': mask_s20_ml,
         'mn13_active': mn13_active,
         'ocean_frac':  ocean_frac,
         'eis_clim':    clim_month['eis'],
@@ -203,7 +216,7 @@ def area_fraction(mask):
     return float((w * mask).sum() / w.sum())
 
 
-def plot_masks(masks, figsize=(10, 11)):
+def plot_masks(masks, figsize=(10, 18)):
     """
     One row per mask. Shading is annual mean ω700; selected grid boxes are
     hatched. S20 panels add the EIS = 1 K contour.

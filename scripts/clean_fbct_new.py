@@ -96,14 +96,23 @@ case a calibration/offset correction anchored to the overlap period
 should be used instead of a straight average. See merge_satellite_records().
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OVERLAP CORRECTION (unchanged from the kernel version)
+NONOBSCURED LOW CLOUD (Scott et al. 2020, Eqs. 3, 4, 9)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FBCT assigns cloud fraction to the topmost cloud layer visible from space,
-so low cloud beneath high cloud is invisible and CF_low is an underestimate.
-We still scale up the observed low-cloud CF by 1 / (1 - CF_high) before
-doing anything else, exactly as in the kernel-based script (Zelinka /
-Zhou et al. 2013 approach). This is applied to the RAW PERCENT cloud
-fraction, before it is converted to a fraction and before deseasonalising.
+so low cloud beneath upper-level cloud is not seen. Following S20 (model 1):
+
+    L_n = L / (1 - U)                       (Eq. 3; U = CTP < 680 hPa)
+
+and, after Eq. 9, L' in the FIRST (amount) term of Eq. 8 is replaced by
+L'_n (1 - Ū), with Ū the monthly climatology of U. Eq. 7 and the second
+(altitude + optical depth) term keep the satellite-reported f'_pr and L',
+so f''_pr still sums to zero over the low bins. All kernels (R̄_pr, R̄_clr,
+f̄_pr / L̄) come from the satellite-reported histogram. The per-bin
+apply_overlap_correction() is not used by this method.
+
+Deviation from S20: U is capped at HIGH_CF_CAP (0.9) in L_n and Ū. The cap
+is active for ~0.1% of ocean grid-box months at 2.5° (rms effect on the
+net CRE anomaly 0.03 W m-2).
 """
 
 import os
@@ -137,6 +146,11 @@ HIGH_CF_CAP = 0.9
 
 # Whether to apply the Zelinka overlap correction.
 USE_OVERLAP_CORRECTION = True
+
+# Scott et al. (2020) weighting of the nonobscured anomaly: L' is replaced by
+# L_n'(1 - Ū), where Ū is the monthly climatology of upper-level cloud
+# fraction. Only used together with USE_OVERLAP_CORRECTION.
+USE_VISIBLE_WEIGHT = True
 
 # Data variable names in the FBCT-with-clear-sky files.
 VAR_CF        = "cldarea_cldtyp_mon"   # [%]  (opt, press, time, lat, lon)
@@ -363,17 +377,14 @@ def apply_overlap_correction(cf: xr.DataArray) -> xr.DataArray:
     cf_high_frac = (cf_high / 100.0).clip(max=HIGH_CF_CAP)
     denom = 1.0 - cf_high_frac
 
-    cf_low = cf.isel(plev=LOW_PRESS_INDICES)
-    cf_low_corrected = cf_low / denom
+    # Select the low bins by position with a boolean along plev. (Assigning
+    # through .values does nothing on the dask arrays open_mfdataset and
+    # xesmf return, which silently skipped this correction before.)
+    is_low = xr.DataArray(np.isin(np.arange(cf.sizes["plev"]), LOW_PRESS_INDICES),
+                          dims="plev", coords={"plev": cf["plev"]})
+    cf_corrected = xr.where(is_low, cf / denom, cf)
 
-    cf_corrected = cf.copy()
-    cf_corrected.values[:, :, LOW_PRESS_INDICES, :, :] = (
-        cf_low_corrected
-        .transpose("time", "tau", "plev", "lat", "lon")
-        .values
-    )
-
-    return cf_corrected
+    return cf_corrected.transpose(*cf.dims)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -404,25 +415,32 @@ def detrend_time(da: xr.DataArray) -> xr.DataArray:
 def compute_dCRE(f_anom: xr.DataArray,
                  f_clim: xr.DataArray,
                  R_clim: xr.DataArray,
-                 Rclr_clim: xr.DataArray) -> dict:
+                 Rclr_clim: xr.DataArray,
+                 L_amount: xr.DataArray | None = None) -> dict:
     """
     Implements Eqs. 6-8 for one radiative band (SW or LW).
 
     Parameters
     ----------
     f_anom : (time, tau, plev_low, lat, lon)
-        Deseasonalised, detrended low-cloud fraction anomaly (fraction, 0-1).
+        Deseasonalised, detrended satellite-reported low-cloud fraction
+        anomaly f'_pr (fraction, 0-1).
     f_clim : (month, tau, plev_low, lat, lon)
-        Climatological monthly-mean low-cloud fraction (fraction, 0-1).
+        Climatological monthly-mean satellite-reported low-cloud fraction.
     R_clim : (month, tau, plev_low, lat, lon)
         Climatological monthly-mean flux for each low-cloud bin, R̄_pr [W m-2].
     Rclr_clim : (month, lat, lon)
         Climatological monthly-mean clear-sky flux, R̄_clr [W m-2].
+    L_amount : (time, lat, lon), optional
+        Anomaly that multiplies the amount kernel in place of L' (S20: the
+        nonobscured L_n'(1 - Ū)). Eq. 7 and the second term of Eq. 8 always
+        use the satellite-reported L' and f'_pr, so f''_pr sums to zero over
+        the low bins (pure redistribution at fixed low-cloud fraction).
 
     Returns
     -------
     dict with keys 'total', 'amount', 'shape', each (time, lat, lon) [W m-2],
-    following Eq. 8: total = amount + shape (exact, no residual).
+    following Eq. 8: total = amount + shape.
     """
     eps = 1e-6
 
@@ -440,7 +458,9 @@ def compute_dCRE(f_anom: xr.DataArray,
     # ── AMOUNT term: [sum_pr(R̄_pr f̄_pr)/L̄ - R̄_clr] * L' ───────────────────
     weighted_R_clim = (R_clim * f_clim).sum(dim=["tau", "plev"]) / L_clim_safe  # (month, lat, lon)
     K_amount = weighted_R_clim - Rclr_clim                          # (month, lat, lon)
-    dCRE_amount = L_anom.groupby("time.month") * K_amount           # (time, lat, lon)
+    L_amt = L_anom if L_amount is None else L_amount
+    dCRE_amount = (L_amt.groupby("time.month") * K_amount
+                   ).drop_vars("month", errors="ignore")           # (time, lat, lon)
 
     # ── SHAPE term: sum_pr (R̄_pr - R̄_clr) * f''_pr ────────────────────────
     K_shape = R_clim - Rclr_clim                                    # (month, tau, plev, lat, lon), broadcasts Rclr_clim over tau,plev
@@ -462,12 +482,14 @@ def process_satellite(sat: str,
     End-to-end pipeline for one satellite:
       1. Load FBCT (with clear-sky fields) and conservative-regrid to
          target_grid (native 1 deg -> TARGET_RES_DEG).
-      2. Apply overlap correction to absolute CF (percent, before deseasonalising).
-      3. Convert CF to fraction (0-1); deseasonalise and detrend.
-      4. Deseasonalise the flux fields (climatology only, no detrend needed).
+      2-3. Convert the satellite-reported CF to fraction; deseasonalise and
+         detrend (f'_pr, f̄_pr). Build L_n = L / (1 - U) (S20 Eq. 3) and the
+         amount anomaly L'_n (1 - Ū).
+      4. Monthly climatologies of the flux fields (R̄_pr, R̄_clr).
       5. Restrict to low-cloud bins.
-      6. Apply Eqs. 6-8 (amount/shape decomposition) separately for SW and LW.
-      7. Sanity-check amount + shape against a directly-computed R_L.
+      6. Apply Eqs. 7-8 separately for SW and LW, with L'_n (1 - Ū) in the
+         amount term.
+      7. Sanity-check amount + shape against the total.
       8. Return packaged xr.Dataset.
     """
     print("  Loading and regridding FBCT (with clear-sky fields)...")
@@ -479,19 +501,29 @@ def process_satellite(sat: str,
     Rclr_sw = ds[VAR_SW_CLR]   # (time, lat, lon)
     Rclr_lw = ds[VAR_LW_CLR]   # (time, lat, lon)
 
-    # ── 2. Overlap correction on absolute CF, still in percent ───────────────
-    if USE_OVERLAP_CORRECTION:
-        print("  Applying Zelinka overlap correction...")
-        cf = apply_overlap_correction(cf)
-    else:
-        print("  Skipping overlap correction.")
-
-    # ── 3. Percent -> fraction, then deseasonalise + detrend CF ──────────────
+    # ── 2-3. Satellite-reported histogram: percent -> fraction, then
+    #         deseasonalise + detrend (f'_pr, f̄_pr feed Eqs. 6-8) ────────────
     cf_frac = cf / 100.0
     print("  Deseasonalising cloud fraction...")
     cf_anom, cf_clim = deseasonalise(cf_frac)
     print("  Detrending cloud fraction anomaly...")
     cf_anom = detrend_time(cf_anom)
+
+    # S20 nonobscured low cloud (Eq. 3), L_n = L / (1 - U), and the amount
+    # anomaly L_n'(1 - Ū) that replaces L' in the first term of Eq. 8
+    L_amount = None
+    apply_vis = USE_OVERLAP_CORRECTION and USE_VISIBLE_WEIGHT
+    if USE_OVERLAP_CORRECTION:
+        print("  Computing nonobscured low cloud L_n = L / (1 - U)...")
+        U = cf_frac.isel(plev=HIGH_PRESS_INDICES).sum(dim=["tau", "plev"]
+                                                      ).clip(max=HIGH_CF_CAP)
+        L = cf_frac.isel(plev=LOW_PRESS_INDICES).sum(dim=["tau", "plev"])
+        L_n_anom, _ = deseasonalise(L / (1.0 - U))
+        L_amount = detrend_time(L_n_anom)
+        if apply_vis:
+            vis_clim = 1.0 - U.groupby("time.month").mean("time")
+            L_amount = (L_amount.groupby("time.month") * vis_clim
+                        ).drop_vars("month")
 
     # ── 4. Climatology of the flux fields (no detrending -- these feed the
     #        kernel-equivalent terms, which are climatological by definition) ─
@@ -509,9 +541,11 @@ def process_satellite(sat: str,
 
     # ── 6. Amount/shape decomposition (Eqs. 6-8), SW and LW separately ───────
     print("  Computing SW low-cloud CRE anomaly (amount + shape)...")
-    sw = compute_dCRE(f_anom_low, f_clim_low, R_sw_clim_low, Rclr_sw_clim)
+    sw = compute_dCRE(f_anom_low, f_clim_low, R_sw_clim_low, Rclr_sw_clim,
+                      L_amount=L_amount)
     print("  Computing LW low-cloud CRE anomaly (amount + shape)...")
-    lw = compute_dCRE(f_anom_low, f_clim_low, R_lw_clim_low, Rclr_lw_clim)
+    lw = compute_dCRE(f_anom_low, f_clim_low, R_lw_clim_low, Rclr_lw_clim,
+                      L_amount=L_amount)
 
     dCRE_SW = sw["total"]
     dCRE_LW = lw["total"]
@@ -530,7 +564,7 @@ def process_satellite(sat: str,
         {
             "dCRE_SW": dCRE_SW.assign_attrs(
                 long_name="Low-cloud SW CRE anomaly", units="W m-2",
-                note="Positive = more energy leaving Earth (weaker SW cooling).",
+                note="Positive = more reflected SW leaving Earth (stronger SW cooling).",
             ),
             "dCRE_LW": dCRE_LW.assign_attrs(
                 long_name="Low-cloud LW CRE anomaly", units="W m-2",
@@ -540,8 +574,10 @@ def process_satellite(sat: str,
             ),
             "dCRE_amount": dCRE_amount.assign_attrs(
                 long_name="Low-cloud NET CRE: amount effect", units="W m-2",
-                description="Radiative impact of low-cloud fraction anomaly L' "
-                            "with the (tau, plev) histogram shape fixed at climatology.",
+                description="Radiative impact of the nonobscured low-cloud "
+                            "anomaly L'_n(1 - Ubar) (S20 model 1, Eq. 8 first "
+                            "term) with the (tau, plev) histogram shape fixed "
+                            "at climatology.",
             ),
             "dCRE_shape": dCRE_shape.assign_attrs(
                 long_name="Low-cloud NET CRE: altitude/optical-depth shape effect",
@@ -557,6 +593,7 @@ def process_satellite(sat: str,
                                      "no external kernel.",
             "grid_resolution_deg":  str(TARGET_RES_DEG) if TARGET_RES_DEG else "native (1 deg)",
             "overlap_corrected":    str(USE_OVERLAP_CORRECTION),
+            "visible_weight_1_minus_Ubar": str(apply_vis),
             "low_press_indices":    str(LOW_PRESS_INDICES),
             "sign_convention":      "Positive = upward flux (energy leaving Earth).",
             "amount_shape_max_abs_diff_sw_Wm2": check_sw,
